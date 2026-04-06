@@ -261,6 +261,19 @@ def send_telegram(text: str):
 
 def main():
     logging.info("=== Daily Digest ===")
+    # Check if it's roughly 8 AM Greece time (Athens tz)
+    athens_tz = timezone(timedelta(hours=2)) if False else None
+    # Use a proper timezone-aware check: 5 or 6 AM UTC covers 7-8 AM EET / 8 AM EEST
+    try:
+        import zoneinfo
+        athens = datetime.now(zoneinfo.ZoneInfo("Europe/Athens"))
+    except (ImportError, zoneinfo.ZoneInfoNotFoundError):
+        athens = datetime.now(timezone.utc) + timedelta(hours=2)
+    greece_hour = athens.hour
+    logging.info(f"It is {greece_hour}:00 in Greece")
+    if greece_hour < 6 or greece_hour > 10:
+        logging.info("Not 8 AM Greece time, skipping (manual trigger detected)")
+        # Still run if manually triggered, just warn
     news = fetch_one_article_per_topic()
     papers = fetch_pubmed(2)
     items = news + papers

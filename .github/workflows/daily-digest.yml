@@ -1,11 +1,9 @@
-# ────────────────────────────────────────────────────────────
-# Runs the daily news digest at 05:00 UTC → 8 AM Greece time
-# ────────────────────────────────────────────────────────────
 name: Daily Digest
 on:
   schedule:
-    - cron: "0 5 * * *"  # 08:00 EET / 07:00 EEST (Greece)
-  workflow_dispatch:          # manual trigger for testing
+    - cron: "0 5 * * *"  # Winter: 5 UTC = 8 AM Greece (EET)
+    - cron: "0 6 * * *"  # Summer: 6 UTC = 8 AM Greece (EEST)
+  workflow_dispatch:
   push:
     branches: [main]
 
