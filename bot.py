@@ -76,6 +76,18 @@ def save_seen_urls(urls):
         pass
 
 
+def clean_description(text):
+    """Remove all HTML tags, URLs, and decode entities."""
+    text = re.sub(r"<[^>]+>", "", text)
+    text = re.sub(r"&nbsp;", " ", text)
+    text = re.sub(r"&amp;", "&", text)
+    text = re.sub(r"&lt;", "<", text)
+    text = re.sub(r"&gt;", ">", text)
+    text = re.sub(r"&quot;", '"', text)
+    text = re.sub(r"https?://\S+", "", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
 def fetch_google_news(query, max_items=20):
     url = f"{GN_BASE}/search?q={query}&hl=en-US&gl=US&ceid=US:en"
     try:
@@ -92,9 +104,9 @@ def fetch_google_news(query, max_items=20):
                 continue
             # Try to get the real article URL
             link_elem = item.find("link")
-            raw_link = link_elem.text if link_elem is not None else (link_elem.get("href", "") if link_elem is not None else "")
-            if not raw_link:
-                raw_link = link_elem.get("href", "") if link_elem is not None else ""
+            raw_link = ""
+            if link_elem is not None:
+                raw_link = link_elem.text or link_elem.get("href", "")
             # Prefer the source element URL (real article URL)
             source_elem = item.find("{http://purl.org/dc/elements/1.1/}source")
             if source_elem is not None and source_elem.get("url"):
@@ -102,8 +114,9 @@ def fetch_google_news(query, max_items=20):
             if not raw_link:
                 raw_link = f"https://www.google.com/search?q={'+'.join(title.split()[:5])}"
             # Clean description
-            desc = item.findtext("{http://purl.org/dc/elements/1.1/}description", item.findtext("description", "") or "").strip()
-            desc = re.sub(r"https?://\S+", "", desc)[:200]
+            desc_raw = item.findtext("{http://purl.org/dc/elements/1.1/}description",
+                                     item.findtext("description", "") or "")
+            desc = clean_description(desc_raw)[:200]
             articles.append({
                 "title": title,
                 "description": desc,
