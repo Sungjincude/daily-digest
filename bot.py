@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Daily article digest bot. 6-7 curated articles + PubMed papers, sent to Telegram."""
 
+import html
 import json
 import logging
 import re
@@ -77,14 +78,18 @@ def save_seen_urls(urls):
 
 
 def clean_description(text):
-    """Remove all HTML tags, URLs, and decode entities."""
-    text = re.sub(r"<[^>]+>", "", text)
-    text = re.sub(r"&nbsp;", " ", text)
-    text = re.sub(r"&amp;", "&", text)
-    text = re.sub(r"&lt;", "<", text)
-    text = re.sub(r"&gt;", ">", text)
-    text = re.sub(r"&quot;", '"', text)
+    """Aggressively remove ALL HTML, entities, and URLs from text."""
+    if not text:
+        return ""
+    # Unescape HTML entities (handles &lt; &amp; &quot; etc all at once)
+    text = html.unescape(text)
+    # Strip all HTML tags (multiple passes for nested/malformed tags)
+    for _ in range(3):
+        text = re.sub(r"<[^>]*>", "", text)
+        text = re.sub(r"<[^>]+$", "", text)
+    # Remove URLs
     text = re.sub(r"https?://\S+", "", text)
+    text = re.sub(r"www\.\S+", "", text)
     return re.sub(r"\s+", " ", text).strip()
 
 
