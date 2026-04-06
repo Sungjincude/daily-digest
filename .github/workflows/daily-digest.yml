@@ -1,0 +1,42 @@
+# ────────────────────────────────────────────────────────────
+# Runs the daily news digest at 05:00 UTC → 8 AM Greece time
+# ────────────────────────────────────────────────────────────
+name: Daily Digest
+on:
+  schedule:
+    - cron: "0 5 * * *"  # 08:00 EET / 07:00 EEST (Greece)
+  workflow_dispatch:          # manual trigger for testing
+  push:
+    branches: [main]
+
+jobs:
+  digest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Run bot
+        env:
+          TELEGRAM_BOT_TOKEN:    ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:      ${{ secrets.TELEGRAM_CHAT_ID }}
+          NEWS_API_KEY:          ${{ secrets.NEWS_API_KEY }}
+          OPENROUTER_API_KEY:    ${{ secrets.OPENROUTER_API_KEY }}
+          LLM_MODEL:             ${{ secrets.LLM_MODEL }}
+        run: python bot.py
+
+      - name: Upload digest log
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: digest-log
+          path: "*.log"
+          retention-days: 1
