@@ -90,11 +90,29 @@ def fetch_google_news(query, max_items=20):
             title = item.findtext("title", "").strip()
             if not title:
                 continue
+            # Extract source from title ("Article Title - Source")
+            parts = title.rsplit(" - ", 1)
+            src = parts[-1].strip() if len(parts) > 1 else ""
+            clean_title = parts[0].strip() if len(parts) > 1 else title
+            # Grab the actual article URL from the link element
+            link_elem = item.find("link")
+            link = ""
+            if link_elem is not None:
+                link = link_elem.get("href", link_elem.text or "").strip()
+            # Clean up the Google News redirect URL to get the direct article link
+            if "news.google.com/rss/articles/" in link:
+                # Try to extract the real URL from the source tag
+                source_elem = item.find("{http://purl.org/dc/elements/1.1/}source")
+                if source_elem is not None and source_elem.get("url"):
+                    link = source_elem.get("url")
+            if not link:
+                # Fallback to a search link
+                link = f"https://www.google.com/search?q={'+'.join(clean_title.split()[:5])}"
             articles.append({
-                "title": title,
-                "description": item.findtext("description", "").strip()[:200],
-                "source": "Google News",
-                "url": f"https://news.google.com/search?q={'+'.join(title.split()[:4])}",
+                "title": clean_title,
+                "description": item.findtext("{http://purl.org/dc/elements/1.1/}description", item.findtext("description", "")).strip()[:200],
+                "source": src or "Google News",
+                "url": link,
             })
         return articles
     except Exception as e:
@@ -272,14 +290,17 @@ def format_digest(selected, papers):
             if a.get("source"):
                 lines.append(f"  ({a['source']})")
             if a.get("description"):
-                lines.append(f"  {a['description'].strip()[:150]}")
-            lines.append(f"  {a.get('url', '')}")
+                # Strip any URLs from description to avoid double links
+                desc = re.sub(r"https?://\S+", "", a["description"].strip())
+                if desc:
+                    lines.append(f"  {desc[:150]}")
+            lines.append(f"  Link: {a.get('url', '')}")
             lines.append("")
     if papers:
         lines.append("--- Scientific Papers ---")
         for p in papers:
             lines.append(f"  {p['title'].strip()}")
-            lines.append(f"  {p['url']}")
+            lines.append(f"  Link: {p['url']}")
             lines.append("")
     return "\n".join(lines)
 
