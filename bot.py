@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Daily article digest bot.
 
-Fetches news (GNews), scientific papers (PubMed), curates with an LLM,
-and sends to Telegram via a scheduled GitHub Action.
+Fetches news from multiple sources (GNews + RSS fallback),
+PubMed papers, curates with an LLM, sends to Telegram.
 """
 
 import json
 import logging
+import re
+import xml.etree.ElementTree as ET
 from collections import defaultdict
 from datetime import datetime, timezone, timedelta
 
@@ -26,46 +28,95 @@ OPENROUTER_KEY = "sk-or-v1-978a266552671079066fe28de6075cd5c593deeac87c8f067bca8
 LLM_MODEL      = "stepfun/step-3.5-flash:free"
 
 NEWS_CATEGORIES = [
-    {"label": "BUSINESS AND ECONOMY",        "query": "economy inflation stock market GDP crypto business",    "count": 5},
-    {"label": "SCIENCE AND TECHNOLOGY",      "query": "science research technology discovery space medicine",   "count": 3},
-    {"label": "WORLD AND CULTURE",           "query": "geography culture travel society international news",   "count": 2},
+    {"label": "BUSINESS AND ECONOMY",  "query": "economy stock market business finance", "count": 5},
+    {"label": "SCIENCE AND TECHNOLOGY","query": "science technology research AI",         "count": 3},
+    {"label": "WORLD AND CULTURE",     "query": "world culture international",            "count": 2},
 ]
 
-GNEWS_SEARCH = "https://gnews.io/api/v4/search"
+GNEWS_SEARCH  = "https://gnews.io/api/v4/search"
 PUBMED_SEARCH = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
 PUBMED_SUMMARY = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
 
-# Clean a string to be safe for Telegram text mode
-def safe(s):
-    return s.replace("\x00", "").strip()
+# RSS feeds as reliable free fallback
+RSS_FEEDS = {
+    "BUSINESS AND ECONOMY":   ["https://www.google.com/rss", "https://feeds.bbci.co.uk/news/business/rss.xml"],
+    "SCIENCE AND TECHNOLOGY": ["https://feeds.bbci.co.uk/news/science_and_environment/rss.xml", "https://feeds.bbci.co.uk/news/technology/rss.xml"],
+    "WORLD AND CULTURE":      ["https://feeds.bbci.co.uk/news/world/rss.xml"],
+}
 
 
-def fetch_gnews(query: str, count: int) -> list[dict]:
-    logging.info(f"  GNews query: {query}")
-    resp = requests.get(GNEWS_SEARCH, params={
-        "q": query, "lang": "en", "sortby": "publishedAt",
-        "max": count * 3, "token": GNEWS_API_KEY,
-    }, timeout=30)
-    resp.raise_for_status()
-    data = resp.json()
-    logging.info(f"  GNews returned {len(data.get('articles', []))} articles")
-    seen, articles = set(), []
-    for a in data.get("articles", []):
-        if not a.get("title") or not a.get("url") or a["url"] in seen:
-            continue
-        seen.add(a["url"])
-        articles.append(a)
-    logging.info(f"  After dedup: {len(articles)}")
-    return articles[: count * 2]
+def fetch_from_rss(label: str, count: int) -> list[dict]:
+    """Fetch articles from RSS feeds."""
+    feeds = RSS_FEEDS.get(label, [])
+    articles = []
+    seen = set()
+    for feed_url in feeds:
+        try:
+            r = requests.get(feed_url, timeout=20)
+            if not r.ok:
+                continue
+            text = r.text.replace("]]>", "")
+            root = ET.fromstring(text)
+            # RSS 2.0
+            for item in root.iter("item"):
+                title = item.findtext("title", "").strip()
+                link = item.findtext("link", "").strip()
+                desc = item.findtext("description", "")
+                # strip HTML tags from description
+                desc = re.sub(r"<[^>]+>", "", desc or "").strip()[:150] if desc else ""
+                if not title or link in seen:
+                    continue
+                seen.add(link)
+                articles.append({
+                    "title": title, "description": desc,
+                    "url": link, "source": "BBC",
+                    "_label": label,
+                })
+                if len(articles) >= count * 3:
+                    break
+        except Exception as e:
+            logging.warning(f"RSS {label} failed: {e}")
+    return articles
+
+
+def fetch_from_gnews(query: str, count: int) -> list[dict]:
+    """Fetch from GNews API (may fail if free tier exhausted)."""
+    try:
+        resp = requests.get(GNEWS_SEARCH, params={
+            "q": query, "lang": "en", "sortby": "publishedAt",
+            "max": count * 3, "token": GNEWS_API_KEY,
+        }, timeout=20)
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("totalArticles", 0) == 0:
+            logging.info(f"  GNews returned 0 articles for '{query}'")
+            return []
+        seen, articles = set(), []
+        for a in data.get("articles", []):
+            if not a.get("title") or not a.get("url") or a["url"] in seen:
+                continue
+            seen.add(a["url"])
+            articles.append(a)
+        return articles
+    except Exception as e:
+        logging.warning(f"GNews failed for '{query}': {e}")
+        return []
 
 
 def fetch_all_news() -> list[dict]:
     result = []
     for cat in NEWS_CATEGORIES:
-        logging.info(f"Fetching {cat['label']} ...")
-        for a in fetch_gnews(cat["query"], cat["count"]):
-            a["_label"] = cat["label"]
-            result.append(a)
+        label, query, count = cat["label"], cat["query"], cat["count"]
+        logging.info(f"Fetching {label} ...")
+        # Try GNews first
+        articles = fetch_from_gnews(query, count)
+        if not articles:
+            logging.info(f"  Falling back to RSS for {label}")
+            articles = fetch_from_rss(label, count)
+        logging.info(f"  Got {len(articles)} articles")
+        for a in articles:
+            a["_label"] = label
+        result.extend(articles[: count * 2])
     logging.info(f"Fetched {len(result)} total news articles")
     return result
 
@@ -73,6 +124,7 @@ def fetch_all_news() -> list[dict]:
 def fetch_pubmed(count: int) -> list[dict]:
     logging.info("Fetching PubMed papers ...")
     try:
+        # Search for recent highly cited/impactful papers
         resp = requests.get(PUBMED_SEARCH, params={
             "db": "pubmed", "term": "last 7 days[edat]",
             "sort": "relevance", "retmax": count * 5,
@@ -103,7 +155,7 @@ def fetch_pubmed(count: int) -> list[dict]:
                 "source": doc.get("source", "PubMed") or "PubMed",
                 "_label": "SCIENTIFIC PAPERS",
             })
-        logging.info(f"  Formatted {len(papers)} PubMed papers")
+        logging.info(f"  Got {len(papers)} PubMed papers")
         return papers[:count]
     except Exception as e:
         logging.warning(f"PubMed fetch failed: {e}")
@@ -112,11 +164,10 @@ def fetch_pubmed(count: int) -> list[dict]:
 
 def curate_with_llm(items: list[dict]) -> str:
     logging.info(f"Sending {len(items)} items to LLM ({LLM_MODEL}) ...")
-
     prompt = (
         "You are a news digest curator. Below is a JSON array of news articles "
-        "and scientific papers. Curate them into sections. "
-        "For news: 5 economics, 3 science/tech, 2 world. "
+        "and scientific papers. Curate them into sections.\n"
+        "For news: keep 5 economics, 3 science/tech, 2 world.\n"
         "Include all scientific papers as a separate section.\n"
         "Format: section header in ALL CAPS, then for each item:\n"
         "NUMBER. TITLE\n"
@@ -131,7 +182,6 @@ def curate_with_llm(items: list[dict]) -> str:
             ensure_ascii=False,
         )
     )
-
     resp = requests.post(
         "https://openrouter.ai/api/v1/chat/completions",
         json={"model": LLM_MODEL, "messages": [{"role":"user","content":prompt}], "temperature":0.3},
@@ -149,19 +199,18 @@ def curate_with_llm(items: list[dict]) -> str:
 
 
 def format_fallback(items: list[dict]) -> str:
-    """Non-LLM fallback: group by category and format."""
     groups = defaultdict(list)
     for a in items:
         groups[a["_label"]].append(a)
     lines = []
     for cat in NEWS_CATEGORIES:
-        label = cat["label"]
-        arts = groups.get(label, [])[:cat["count"]]
+        label, count = cat["label"], cat["count"]
+        arts = groups.get(label, [])[:count]
         if arts:
             lines.append(f"\n--- {label} ---")
             for i, a in enumerate(arts, 1):
-                lines.append(f"  {i}. {safe(a['title'])}")
-                desc = safe(a.get("description", ""))
+                lines.append(f"  {i}. {a['title'].strip()}")
+                desc = a.get("description", "").strip()
                 if desc:
                     lines.append(f"     {desc[:150]}")
                 lines.append(f"     {a['url']}")
@@ -169,43 +218,24 @@ def format_fallback(items: list[dict]) -> str:
     if papers:
         lines.append(f"\n--- SCIENTIFIC PAPERS ---")
         for i, p in enumerate(papers, 1):
-            lines.append(f"  {i}. {safe(p['title'])}")
+            lines.append(f"  {i}. {p['title'].strip()}")
             lines.append(f"     {p['url']}")
     return "\n".join(lines)
 
 
 def send_telegram(text: str):
-    """Send to Telegram. Falls back to very simple message on failure."""
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-
-    # First try with the full digest
-    try:
-        full = f"Good morning! Daily digest - {today}\n\n{text}"
-        # Telegram limit is 4096 chars, send in chunks
-        MAX = 4000
-        for start in range(0, len(full), MAX):
-            chunk = full[start:start + MAX]
-            resp = requests.post(url, json={
-                "chat_id": TELEGRAM_CHAT, "text": chunk,
-                "disable_web_page_preview": True,
-            }, timeout=30)
-            resp.raise_for_status()
-        logging.info("Digest sent to Telegram OK")
-        return
-    except Exception as e:
-        logging.warning(f"Telegram send failed ({e}), retrying with plain fallback")
-
-    # Fallback: send a very simple message
-    simple = f"Daily Digest - {today}\n\n{text[:4000]}"
-    resp = requests.post(url, json={
-        "chat_id": TELEGRAM_CHAT,
-        "text": simple,
-    }, timeout=30)
-    if resp.ok:
-        logging.info("Fallback message sent OK")
-    else:
-        logging.error(f"Even fallback failed: {resp.status_code} {resp.text[:500]}")
+    full = f"Good morning! Daily digest - {today}\n\n{text}"
+    MAX = 4000
+    for start in range(0, len(full), MAX):
+        chunk = full[start:start + MAX]
+        resp = requests.post(url, json={
+            "chat_id": TELEGRAM_CHAT, "text": chunk,
+            "disable_web_page_preview": True,
+        }, timeout=30)
+        resp.raise_for_status()
+    logging.info(f"Digest sent to Telegram OK")
 
 
 def main():
@@ -213,19 +243,15 @@ def main():
     news = fetch_all_news()
     papers = fetch_pubmed(2)
     items = news + papers
-
     if not items:
         send_telegram("No articles found today.")
         return
-
-    # Try LLM curation, fallback to rules
     try:
         digest = curate_with_llm(items)
         logging.info("LLM curation succeeded")
     except Exception as e:
         logging.warning(f"LLM failed ({e}), using fallback")
         digest = format_fallback(items)
-
     send_telegram(digest)
     logging.info("Done!")
 
