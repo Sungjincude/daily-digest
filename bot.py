@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Daily article digest bot. 6 curated articles + PubMed papers, sent to Telegram."""
+"""Daily article digest bot. 6-7 curated articles + PubMed papers, sent to Telegram.
+
+Uses Google News RSS (free, no API key, always works) + PubMed + GNews fallback.
+"""
 
 import json
 import logging
@@ -23,75 +26,37 @@ PUBMED_KEY     = "05abc7658eeac8454076a773b5368fff6c09"
 OPENROUTER_KEY = "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"
 LLM_MODEL      = "stepfun/step-3.5-flash:free"
 
+# Google News RSS feed - no API key, always free
+GN_BASE = "https://news.google.com/rss"
+
 TOPICS = [
     {
         "label": "Finance",
-        "keywords": ["finance", "banking", "currency", "debt", "stock", "wall street",
-                      "invest", "bank", "interest rate", "inflation", "federal reserve",
-                      "treasury", "bonds", "hedge fund"],
-        "feeds": [
-            "https://feeds.bbci.co.uk/news/business/rss.xml",
-            "https://finance.yahoo.com/news/rssindex",
-        ],
+        "query": "finance banking currency economy inflation interest rates",
     },
     {
         "label": "Business",
-        "keywords": ["business", "company", "industry", "trade", "market", "corporate",
-                      "startup", "merger", "acquisition", "CEO", "executive", "earnings"],
-        "feeds": [
-            "https://feeds.bbci.co.uk/news/business/rss.xml",
-            "https://www.reuters.com/rssFeed/business",
-        ],
+        "query": "business companies market industry trade corporate",
     },
     {
         "label": "Technology",
-        "keywords": ["technology", "software", "AI", "artificial intelligence", "cyber",
-                      "data", "computing", "tech", "digital", "internet", "cloud",
-                      "cybersecurity", "startup", "chip", "semiconductor"],
-        "feeds": [
-            "https://feeds.bbci.co.uk/news/technology/rss.xml",
-            "https://www.wired.com/feed/rss",
-        ],
+        "query": "technology software AI artificial intelligence computing",
     },
     {
         "label": "Animals",
-        "keywords": ["animal", "wildlife", "endangered", "conservation", "species",
-                      "pet", "dog", "cat", "ocean", "marine", "bird", "dinosaur",
-                      "mammal", "reptile", "habitat", "ecosystem"],
-        "feeds": [
-            "https://feeds.bbci.co.uk/news/science_and_environment/rss.xml",
-        ],
+        "query": "animals wildlife species conservation endangered",
     },
     {
         "label": "Science",
-        "keywords": ["science", "research", "discovery", "experiment", "medicine",
-                      "biology", "physics", "space", "NASA", "DNA", "genome",
-                      "quantum", "astronomy", "neuroscience", "clinical trial"],
-        "feeds": [
-            "https://feeds.bbci.co.uk/news/science_and_environment/rss.xml",
-            "https://www.nasa.gov/rss/dyn/breaking_news.rss",
-        ],
+        "query": "science research discovery medicine biology physics",
     },
     {
         "label": "History",
-        "keywords": ["history", "historical", "ancient", "medieval", "archaeology",
-                      "archaeological", "artifact", "empire", "civilization",
-                      "historic", "war history", "historian"],
-        "feeds": [
-            "https://www.historytoday.com/rss",
-        ],
+        "query": "history historical ancient archaeology civilization historical discovery",
     },
     {
         "label": "Arts and Travel",
-        "keywords": ["arts", "culture", "travel", "museum", "music", "film",
-                      "painting", "tourism", "festival", "exhibition", "gallery",
-                      "theatre", "theater", "concert", "destination", "tourist",
-                      "heritage", "cultural", "art", "artist"],
-        "feeds": [
-            "https://www.theguardian.com/travel/rss",
-            "https://www.theguardian.com/arts/rss",
-            "https://www.theguardian.com/culture/rss",
-        ],
+        "query": "arts culture travel tourism heritage museum festival",
     },
 ]
 
@@ -99,93 +64,87 @@ PUBMED_SEARCH = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
 PUBMED_SUMMARY = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
 
 
-def clean_html(s):
-    return re.sub(r"<[^>]+>", "", s).strip()
-
-
-def matches_keywords(text, keywords):
-    text_lower = text.lower()
-    return any(kw.lower() in text_lower for kw in keywords)
-
-
-# Words that indicate a bad match (weather, local news, etc.)
-EXCLUDE_KEYWORDS = [
-    "weather", "forecast", "temperature", "degrees", "celsius", "fahrenheit",
-    "rain", "snowfall", "precipitation", "met office",
-    "lottery", "obituary", "death notice",
-    "classified", "advertisement", "advert",
-]
-
-
-def is_relevant(articles, include, exclude):
-    combined = (" ".join(a["title"] for a in articles) + " " +
-                " ".join(a.get("description", "") for a in articles)).lower()
-    if any(ex in combined for ex in [e.lower() for e in exclude]):
-        return False
-    return any(kw.lower() in combined for kw in include)
-
-
-def fetch_rss(feed_url):
+def fetch_google_news(query: str) -> list[dict]:
+    """Fetch from Google News RSS with a specific search query."""
+    url = f"{GN_BASE}/search?q={query}&hl=en-US&gl=US&ceid=US:en"
     try:
-        r = requests.get(
-            feed_url, timeout=15,
-            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
-        )
-        if not r.ok:
-            logging.warning(f"    Feed HTTP {r.status_code}")
-            return []
-        text = r.text.replace("]]>", "").strip()
-        root = ET.fromstring(text.encode("utf-8"))
+        resp = requests.get(url, timeout=20, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept-Language": "en-US,en;q=0.9",
+        })
+        resp.raise_for_status()
+        text = resp.text.replace("]]>", "").strip()
+        root = ET.fromstring(text)
         articles = []
         for item in root.iter("item"):
-            title = item.findtext("title", "").strip()
-            link = item.findtext("link", "").strip()
-            desc = clean_html(item.findtext("description", "") or "")
-            if not title or not link:
+            title_elem = item.findtext("title", "").strip()
+            # Google News titles are "Title - Source"
+            # Split on last " - " to get source
+            parts = title_elem.rsplit(" - ", 1)
+            title = parts[0].strip() if len(parts) > 1 else title_elem.strip()
+            source = parts[-1].strip() if len(parts) > 1 else "Unknown"
+            link_elem = item.find("link")
+            link = link_elem.get("href", "") if link_elem is not None else ""
+            # Google News links are relative, need to fix
+            if link.startswith("/articles/"):
+                link = f"https://news.google.com{link}"
+            desc = item.findtext("description", "").strip()
+            pub_date = item.findtext("pubDate", "").strip()
+            if not title:
                 continue
             articles.append({
-                "title": title, "url": link,
-                "description": desc[:200], "source": "RSS",
+                "title": title,
+                "url": f"https://news.google.com/search?q={title.replace(' ', '+')}",
+                "description": desc[:200] if desc else "",
+                "source": source,
+                "published": pub_date,
             })
         return articles
     except Exception as e:
-        logging.warning(f"    Feed failed: {e}")
+        logging.warning(f"Google News failed for '{query}': {e}")
+        return []
+
+
+def fetch_gnews_fallback(query: str, count: int) -> list[dict]:
+    """Try GNews if Google News fails."""
+    try:
+        resp = requests.get("https://gnews.io/api/v4/search", params={
+            "q": query, "lang": "en", "sortby": "publishedAt",
+            "max": count * 3, "token": GNEWS_API_KEY,
+        }, timeout=20)
+        resp.raise_for_status()
+        result = []
+        seen = set()
+        for a in resp.json().get("articles", []):
+            if not a.get("title") or not a.get("url") or a["url"] in seen:
+                continue
+            seen.add(a["url"])
+            result.append(a)
+        return result
+    except Exception:
         return []
 
 
 def fetch_one_article_per_topic() -> list[dict]:
+    """Fetch 1 article per topic from Google News, fallback to GNews."""
     result = []
     for topic in TOPICS:
         label = topic["label"]
-        keywords = topic["keywords"]
-        logging.info(f"Fetching {label} ...")
+        query = topic["query"]
+        logging.info(f"Fetching {label}: '{query}' ...")
 
-        found = None
-        for feed_url in topic["feeds"]:
-            if found:
-                break
-            logging.info(f"  Trying: {feed_url.split('://')[1][:50]}...")
-            articles = fetch_rss(feed_url)
-            logging.info(f"    Got {len(articles)} articles from feed")
+        articles = fetch_google_news(query)
+        if not articles:
+            logging.info(f"  Google News returned 0, trying GNews ...")
+            articles = fetch_gnews_fallback(query, 3)
 
-            for a in articles:
-                # Check relevance: must have keywords, must NOT have exclude words
-                title_desc = a["title"] + " " + a["description"]
-                if not matches_keywords(title_desc, keywords):
-                    continue
-                # Exclude weather/unwanted content
-                td_lower = title_desc.lower()
-                if any(ex in td_lower for ex in [e.lower() for e in EXCLUDE_KEYWORDS]):
-                    continue
-                found = a
-                found["_label"] = label
-                logging.info(f"  MATCH: {found['title'][:80]}")
-                break
-
-        if found:
-            result.append(found)
+        if articles:
+            article = articles[0]  # Most recent
+            article["_label"] = label
+            result.append(article)
+            logging.info(f"  Got: {article['title'][:80]}")
         else:
-            logging.warning(f"  NO MATCH for {label}")
+            logging.warning(f"  NO articles found for {label}")
 
     logging.info(f"Fetched {len(result)}/{len(TOPICS)} articles")
     return result
@@ -236,7 +195,7 @@ def curate_with_llm(items: list[dict]) -> str:
         "TITLE\n"
         "   One-sentence summary\n"
         "   URL\n\n"
-        "Keep it clean. No markdown code blocks, no backticks.\n\n"
+        "Keep it clean. No markdown code blocks, no backticks, no asterisks.\n\n"
         + json.dumps(
             [{"title": a["title"], "description": a.get("description",""),
               "url": a["url"], "source": a.get("source",""),
