@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Daily article digest bot. Fetches fresh articles (no repeats), curates with LLM, sends to Telegram."""
+"""Daily article digest bot. 6-7 curated articles + PubMed papers, sent to Telegram."""
 
 import json
 import logging
-import os
+import re
 import xml.etree.ElementTree as ET
+from collections import defaultdict
 from datetime import datetime, timezone, timedelta
 
 import requests
@@ -23,8 +24,8 @@ OPENROUTER_KEY = "sk-or-v1-978a266552671079066fe28de6075cd5c593deeac87c8f067bca8
 LLM_MODEL      = "stepfun/step-3.5-flash:free"
 GN_BASE = "https://news.google.com/rss"
 
-# Keep seen URLs for 7 days to avoid repeats
-SEEN_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "seen_urls.txt")
+# Track seen URLs for 7 days so we don't repeat
+SEEN_FILE = "/tmp/daily_digest_seen.txt"
 SEEN_DAYS = 7
 
 TOPICS = [
@@ -41,49 +42,42 @@ PUBMED_SEARCH = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
 PUBMED_SUMMARY = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
 
 
-# ── Seen URL tracking (avoids repeats for SEEN_DAYS) ────────────────────────
-def load_seen():
-    """Load set of URLs seen recently."""
-    seen = set()
-    if not os.path.exists(SEEN_FILE):
-        return seen
+def load_seen_urls():
     try:
         with open(SEEN_FILE) as f:
+            urls = set()
             for line in f:
                 line = line.strip()
-                if line and line != "":
-                    parts = line.split("|||", 1)
-                    if len(parts) == 2:
-                        date_str, url = parts
-                        d = datetime.strptime(date_str, "%Y-%m-%d").date()
-                        if d >= datetime.now().date() - timedelta(days=SEEN_DAYS):
-                            seen.add(url)
+                if line and "|||" in line:
+                    date_str, url = line.split("|||", 1)
+                    d = datetime.strptime(date_str, "%Y-%m-%d").date()
+                    if d >= datetime.now().date() - timedelta(days=SEEN_DAYS):
+                        urls.add(url)
+            return urls
     except Exception:
-        pass
-    return seen
+        return set()
 
 
-def save_seen(seen):
-    """Save seen URLs with dates (auto-cleans after SEEN_DAYS)."""
+def save_seen_urls(urls):
     cutoff = datetime.now().date() - timedelta(days=SEEN_DAYS)
     lines = []
-    for url, d in seen.items():
+    for item in urls:
+        if isinstance(item, tuple):
+            d, url = item
+        else:
+            url = item
+            d = datetime.now().date()
         if d >= cutoff:
             lines.append(f"{d.strftime('%Y-%m-%d')}|||{url}")
-    with open(SEEN_FILE, "w") as f:
-        f.write("\n".join(lines) + "\n")
-
-
-# ── Fetch from multiple sources ─────────────────────────────────────────────
-def clean_url(text):
-    """Extract first URL from text."""
-    m = re.search(r'(https?://\S+)', text)
-    return m.group(1) if m else ""
+    try:
+        with open(SEEN_FILE, "w") as f:
+            f.write("\n".join(lines) + "\n")
+    except Exception:
+        pass
 
 
 def fetch_google_news(query, max_items=20):
-    """Fetch from Google News RSS."""
-    url = f"{GN_BASE}/search?q={query}&hl=en-US&gl=US&ceid=US:en&num={max_items}"
+    url = f"{GN_BASE}/search?q={query}&hl=en-US&gl=US&ceid=US:en"
     try:
         resp = requests.get(url, timeout=20, headers={
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
@@ -96,27 +90,25 @@ def fetch_google_news(query, max_items=20):
             title = item.findtext("title", "").strip()
             if not title:
                 continue
-            parts = title.rsplit(" - ", 1)
-            src = parts[-1].strip() if len(parts) > 1 else ""
-            clean_title = parts[0].strip() if len(parts) > 1 else title
-
-            # Get the real article URL from the source element (only reliable source)
+            # Try to get the real article URL
+            link_elem = item.find("link")
+            raw_link = link_elem.text if link_elem is not None else (link_elem.get("href", "") if link_elem is not None else "")
+            if not raw_link:
+                raw_link = link_elem.get("href", "") if link_elem is not None else ""
+            # Prefer the source element URL (real article URL)
             source_elem = item.find("{http://purl.org/dc/elements/1.1/}source")
-            link = source_elem.get("url", "") if source_elem is not None else ""
-
-            # Get description, strip any URLs from it
-            desc = item.findtext("{http://purl.org/dc/elements/1.1/}description",
-                                 item.findtext("description", ""))
-            desc = re.sub(r'https?://\S+', '', desc or "").strip()[:200]
-
-            # If source URL is empty, use Google search as fallback
-            if not link:
-                link = f"https://www.google.com/search?q={'+'.join(clean_title.split()[:5])}"
+            if source_elem is not None and source_elem.get("url"):
+                raw_link = source_elem.get("url")
+            if not raw_link:
+                raw_link = f"https://www.google.com/search?q={'+'.join(title.split()[:5])}"
+            # Clean description
+            desc = item.findtext("{http://purl.org/dc/elements/1.1/}description", item.findtext("description", "") or "").strip()
+            desc = re.sub(r"https?://\S+", "", desc)[:200]
             articles.append({
-                "title": clean_title,
+                "title": title,
                 "description": desc,
-                "source": src or "Google News",
-                "url": link,
+                "source": title.rsplit(" - ", 1)[-1].strip() if " - " in title else "",
+                "url": raw_link,
             })
         return articles
     except Exception as e:
@@ -125,7 +117,6 @@ def fetch_google_news(query, max_items=20):
 
 
 def fetch_gnews(query, count=10):
-    """Fetch from GNews API (if quota available)."""
     try:
         resp = requests.get("https://gnews.io/api/v4/search", params={
             "q": query, "lang": "en", "sortby": "publishedAt",
@@ -135,32 +126,24 @@ def fetch_gnews(query, count=10):
         result = []
         seen = set()
         for a in resp.json().get("articles", []):
-            if a.get("title") and a.get("url"):
-                if a["url"] in seen:
-                    continue
-                seen.add(a["url"])
-                desc = re.sub(r'https?://\S+', '', a.get("description", "")).strip()
-                result.append({
-                    "title": a["title"],
-                    "description": desc[:200],
-                    "source": a.get("source", {}).get("name", "GNews"),
-                    "url": a["url"],
-                })
+            if not a.get("title") or not a.get("url") or a["url"] in seen:
+                continue
+            seen.add(a["url"])
+            desc = re.sub(r"https?://\S+", "", a.get("description", "") or "").strip()[:200]
+            result.append({
+                "title": a["title"], "description": desc,
+                "url": a["url"],
+                "source": a.get("source", {}).get("name", "GNews"),
+            })
         return result
     except Exception:
         return []
 
 
 def fetch_articles_for_topic(query, seen_urls, count=8):
-    """Fetch articles from GNews first (more variety), fallback to Google News."""
     articles = fetch_gnews(query, count)
-    if articles:
-        articles[0]["_gn_backup"] = True  # mark GNews articles
-
     gn_articles = fetch_google_news(query)
     articles.extend(gn_articles)
-
-    # Deduplicate by title similarity and filter out already-seen URLs
     unique = []
     seen_titles = set()
     for a in articles:
@@ -173,39 +156,31 @@ def fetch_articles_for_topic(query, seen_urls, count=8):
         unique.append(a)
         if len(unique) >= count:
             break
-
     return unique
 
 
-# ── LLM picks one best article per topic ────────────────────────────────────
 def pick_with_llm(article_pools):
-    """Send all candidate articles to LLM, let it pick 1 per topic."""
     articles_to_send = []
     for label, articles in article_pools.items():
         for a in articles:
             a["_label"] = label
             articles_to_send.append(a)
-
     if not articles_to_send:
         return {}
-
     prompt = (
         "You are curating a daily news digest. Below is a list of articles by category.\n"
-        "For EACH category, pick EXACTLY ONE article — the most interesting or important one.\n"
-        "Try to pick different articles each day, not the most obvious headline.\n"
-        "Respond with a JSON object mapping each category label to the article's index (0-based).\n"
-        "Only output valid JSON, nothing else.\n\n"
+        "For EACH category, pick EXACTLY ONE article index (0-based) - the most interesting one.\n"
+        "Respond with ONLY a JSON object: {\"CategoryName\": index}\n\n"
         + json.dumps(
-            [{"title": a["title"], "description": a.get("description", ""),
-              "source": a.get("source", ""), "category": a["_label"]}
+            [{"title": a["title"], "description": a.get("description",""),
+              "source": a.get("source",""), "category": a["_label"]}
              for a in articles_to_send],
             ensure_ascii=False,
         )
     )
-
     resp = requests.post(
         "https://openrouter.ai/api/v1/chat/completions",
-        json={"model": LLM_MODEL, "messages": [{"role": "user", "content": prompt}], "temperature": 0.7},
+        json={"model": LLM_MODEL, "messages": [{"role":"user","content":prompt}], "temperature":0.7},
         headers={
             "Authorization": "Bearer " + OPENROUTER_KEY,
             "Content-Type": "application/json",
@@ -216,52 +191,43 @@ def pick_with_llm(article_pools):
     if not resp.ok:
         logging.warning(f"LLM {resp.status_code}: {resp.text[:300]}")
         resp.raise_for_status()
-
-    result = resp.json()["choices"][0]["message"]["content"]
-    # Parse JSON from response (may have markdown code blocks)
-    result = result.strip()
+    result = resp.json()["choices"][0]["message"]["content"].strip()
     if result.startswith("```"):
-        result = result[result.index("\n")+1:]
-        if result.endswith("```"):
-            result = result[:-3]
-    result = result.strip()
-    picked = json.loads(result)
-
-    # Build selected articles
+        lines = result.split("\n")
+        lines = [l for l in lines if not l.startswith("```")]
+        result = "\n".join(lines).strip()
+    try:
+        picked = json.loads(result)
+    except json.JSONDecodeError:
+        return pick_fallback(article_pools)
     selected = {}
-    idx = 0
     for label, articles in article_pools.items():
-        if label in picked:
-            chosen_idx = picked[label]
-            if isinstance(chosen_idx, int) and 0 <= chosen_idx < len(articles_to_send):
-                article = articles_to_send[chosen_idx]
-                if article["_label"] == label:
-                    selected[label] = article
-        # Fallback: first article from pool
+        if label in picked and isinstance(picked[label], int):
+            idx = picked[label]
+            if 0 <= idx < len(articles_to_send) and articles_to_send[idx].get("_label") == label:
+                selected[label] = articles_to_send[idx]
         if label not in selected and articles:
             selected[label] = articles[0]
-
     return selected
 
 
 def pick_fallback(article_pools):
-    """Non-LLM fallback: pick newest article per topic."""
     selected = {}
     for label, articles in article_pools.items():
         if articles:
-            selected[label] = articles[0]  # Most recent
+            selected[label] = articles[0]
     return selected
 
 
-# ── PubMed ──────────────────────────────────────────────────────────────────
 def fetch_pubmed(count=2):
     logging.info("Fetching PubMed papers ...")
     try:
         resp = requests.get(PUBMED_SEARCH, params={
             "db": "pubmed", "term": "last 7 days[edat]",
-            "sort": "relevance", "retmax": count * 5,
+            "sort": "relevance", "retmax": count*5,
             "retmode": "json", "api_key": PUBMED_KEY,
         }, timeout=30)
+        resp.raise_for_status()
         ids = resp.json().get("esearchresult", {}).get("idlist", [])
         if not ids:
             return []
@@ -269,26 +235,25 @@ def fetch_pubmed(count=2):
             "db": "pubmed", "id": ",".join(ids[:count*3]),
             "retmode": "json", "api_key": PUBMED_KEY,
         }, timeout=30)
+        resp.raise_for_status()
         docs = resp.json().get("result", {})
         papers = []
         for uid, doc in docs.items():
             if uid == "uids":
                 continue
             title = doc.get("title", "").strip()
-            if not title:
-                continue
-            papers.append({
-                "title": title,
-                "url": f"https://pubmed.ncbi.nlm.nih.gov/{uid}/",
-                "source": doc.get("source", "PubMed") or "PubMed",
-            })
+            if title:
+                papers.append({
+                    "title": title, "description": "",
+                    "url": f"https://pubmed.ncbi.nlm.nih.gov/{uid}/",
+                    "source": doc.get("source", "PubMed") or "PubMed",
+                })
         return papers[:count]
     except Exception as e:
         logging.warning(f"PubMed failed: {e}")
         return []
 
 
-# ── Format & send ───────────────────────────────────────────────────────────
 def format_digest(selected, papers):
     lines = []
     for topic in TOPICS:
@@ -300,10 +265,10 @@ def format_digest(selected, papers):
             if a.get("source"):
                 lines.append(f"  ({a['source']})")
             if a.get("description"):
-                desc = a.get("description", "").strip()
-                if desc:
-                    lines.append(f"  {desc[:150]}")
-            lines.append(f"  {a.get('url', '')}")
+                lines.append(f"  {a['description'].strip()[:150]}")
+            url = a.get("url", "").strip()
+            if url:
+                lines.append(f"  {url}")
             lines.append("")
     if papers:
         lines.append("--- Scientific Papers ---")
@@ -329,12 +294,9 @@ def send_telegram(text):
     logging.info("Digest sent to Telegram OK")
 
 
-# ── Main ────────────────────────────────────────────────────────────────────
 def main():
     logging.info("=== Daily Digest ===")
-    seen_urls = load_seen()
-
-    # Fetch articles for each topic
+    seen_urls = load_seen_urls()
     article_pools = {}
     news = []
     for topic in TOPICS:
@@ -346,8 +308,6 @@ def main():
             a["_label"] = label
             news.append(a)
         logging.info(f"  Got {len(pool)} unique articles")
-
-    # LLM picks 1 per topic
     selected = {}
     try:
         selected = pick_with_llm(article_pools)
@@ -355,20 +315,14 @@ def main():
     except Exception as e:
         logging.warning(f"LLM failed ({e}), using fallback")
         selected = pick_fallback(article_pools)
-
-    # Track seen URLs
     for label, a in selected.items():
         url = a.get("url", "")
         if url:
             seen_urls.add(url)
-    save_seen({u: datetime.now().date() for u in seen_urls})
-
-    # PubMed papers
+    save_seen_urls({(datetime.now().date(), url) for url in seen_urls})
     papers = fetch_pubmed(2)
     for i, p in enumerate(papers, 1):
         logging.info(f"  PubMed {i}: {p['title'][:80]}")
-
-    # Format and send
     digest = format_digest(selected, papers)
     send_telegram(digest)
     logging.info("Done!")
