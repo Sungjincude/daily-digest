@@ -267,7 +267,57 @@ def fetch_pubmed(count=2):
         return []
 
 
-def format_digest(selected, papers):
+def generate_bonus_sections():
+    """Ask the LLM to generate 5 random fun facts + 5 details about a random place."""
+    prompt = (
+        "Generate TWO sections:\n\n"
+        "Section 1: 5 RANDOM FUN FACTS\n"
+        "Five short (1-2 sentences each), surprising, true fun facts about anything "
+        "(science, history, animals, language, food, the human body, etc.). "
+        "Each must be genuinely interesting and not commonly known.\n\n"
+        "Section 2: A RANDOM PLACE\n"
+        "Pick one interesting place in the world (a city, region, island, or country — "
+        "anything specific). Provide 5 interesting details about it "
+        "(history, culture, nature, geography, food, traditions, etc.). "
+        "Pick a diverse range over time — don't always pick the same well-known places.\n\n"
+        "Format EXACTLY like this, with no extra text:\n\n"
+        "--- RANDOM FUN FACTS ---\n"
+        "  1. [fact]\n"
+        "  2. [fact]\n"
+        "  3. [fact]\n"
+        "  4. [fact]\n"
+        "  5. [fact]\n\n"
+        "--- A PLACE: [Place Name] ---\n"
+        "  1. [detail]\n"
+        "  2. [detail]\n"
+        "  3. [detail]\n"
+        "  4. [detail]\n"
+        "  5. [detail]\n\n"
+        "No backticks, no markdown, no extra text before or after."
+    )
+    resp = requests.post(
+        "https://openrouter.ai/api/v1/chat/completions",
+        json={"model": LLM_MODEL, "messages": [{"role": "user", "content": prompt}], "temperature": 0.9},
+        headers={
+            "Authorization": "Bearer " + OPENROUTER_KEY,
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://github.com/daily-digest",
+        },
+        timeout=120,
+    )
+    if not resp.ok:
+        logging.warning(f"BONUS LLM {resp.status_code}")
+        return None
+    result = resp.json()["choices"][0]["message"]["content"].strip()
+    # Strip markdown code blocks if any
+    if result.startswith("```"):
+        lines = result.split("\n")
+        lines = [l for l in lines if not l.strip().startswith("```")]
+        result = "\n".join(lines).strip()
+    return result
+
+
+def format_digest(selected, papers, bonus=None):
     lines = []
     for topic in TOPICS:
         label = topic["label"]
@@ -289,6 +339,8 @@ def format_digest(selected, papers):
             lines.append(f"  {p['title'].strip()}")
             lines.append(f"  {p['url']}")
             lines.append("")
+    if bonus:
+        lines.append(bonus)
     return "\n".join(lines)
 
 
@@ -336,7 +388,15 @@ def main():
     papers = fetch_pubmed(2)
     for i, p in enumerate(papers, 1):
         logging.info(f"  PubMed {i}: {p['title'][:80]}")
-    digest = format_digest(selected, papers)
+    # Generate bonus fun facts + place section
+    bonus = None
+    try:
+        bonus = generate_bonus_sections()
+        if bonus:
+            logging.info("Bonus sections generated OK")
+    except Exception as e:
+        logging.warning(f"Bonus generation failed: {e}")
+    digest = format_digest(selected, papers, bonus)
     send_telegram(digest)
     logging.info("Done!")
 
