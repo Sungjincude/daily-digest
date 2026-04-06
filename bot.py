@@ -75,6 +75,12 @@ def save_seen(seen):
 
 
 # ── Fetch from multiple sources ─────────────────────────────────────────────
+def clean_url(text):
+    """Extract first URL from text."""
+    m = re.search(r'(https?://\S+)', text)
+    return m.group(1) if m else ""
+
+
 def fetch_google_news(query, max_items=20):
     """Fetch from Google News RSS."""
     url = f"{GN_BASE}/search?q={query}&hl=en-US&gl=US&ceid=US:en&num={max_items}"
@@ -90,29 +96,24 @@ def fetch_google_news(query, max_items=20):
             title = item.findtext("title", "").strip()
             if not title:
                 continue
-            # Extract source from title ("Article Title - Source")
             parts = title.rsplit(" - ", 1)
             src = parts[-1].strip() if len(parts) > 1 else ""
             clean_title = parts[0].strip() if len(parts) > 1 else title
-            # Grab the actual article URL from the link element
-            link_elem = item.find("link")
-            link = ""
-            if link_elem is not None:
-                link = link_elem.get("href", link_elem.text or "").strip()
-            # Clean up the Google News redirect URL to get the direct article link
-            if "news.google.com/rss/articles/" in link:
-                # Try to extract the real URL from the source tag
-                source_elem = item.find("{http://purl.org/dc/elements/1.1/}source")
-                if source_elem is not None and source_elem.get("url"):
-                    link = source_elem.get("url")
-            if not link:
-                # Fallback to a search link
-                link = f"https://www.google.com/search?q={'+'.join(clean_title.split()[:5])}"
+
+            # Get the real article URL from the source element (only reliable source)
+            source_elem = item.find("{http://purl.org/dc/elements/1.1/}source")
+            link = source_elem.get("url", "") if source_elem is not None else ""
+
+            # Get description, strip any URLs from it
+            desc = item.findtext("{http://purl.org/dc/elements/1.1/}description",
+                                 item.findtext("description", ""))
+            desc = re.sub(r'https?://\S+', '', desc or "").strip()[:200]
+
             articles.append({
                 "title": clean_title,
-                "description": item.findtext("{http://purl.org/dc/elements/1.1/}description", item.findtext("description", "")).strip()[:200],
+                "description": desc,
                 "source": src or "Google News",
-                "url": link,
+                "url": link or "",
             })
         return articles
     except Exception as e:
@@ -129,10 +130,16 @@ def fetch_gnews(query, count=10):
         }, timeout=15)
         resp.raise_for_status()
         result = []
+        seen = set()
         for a in resp.json().get("articles", []):
             if a.get("title") and a.get("url"):
+                if a["url"] in seen:
+                    continue
+                seen.add(a["url"])
+                desc = re.sub(r'https?://\S+', '', a.get("description", "")).strip()
                 result.append({
-                    "title": a["title"], "description": a.get("description", "")[:200],
+                    "title": a["title"],
+                    "description": desc[:200],
                     "source": a.get("source", {}).get("name", "GNews"),
                     "url": a["url"],
                 })
@@ -143,11 +150,11 @@ def fetch_gnews(query, count=10):
 
 def fetch_articles_for_topic(query, seen_urls, count=8):
     """Fetch articles from GNews first (more variety), fallback to Google News."""
-    # Try GNews first — it returns different results due to different algorithm
     articles = fetch_gnews(query, count)
-    # Also get Google News for backup
+    if articles:
+        articles[0]["_gn_backup"] = True  # mark GNews articles
+
     gn_articles = fetch_google_news(query)
-    # Combine: GNews articles first (more variety), then Google News
     articles.extend(gn_articles)
 
     # Deduplicate by title similarity and filter out already-seen URLs
@@ -155,7 +162,7 @@ def fetch_articles_for_topic(query, seen_urls, count=8):
     seen_titles = set()
     for a in articles:
         url = a.get("url", "")
-        title_key = a["title"].lower()[:60]  # normalize for similarity
+        title_key = a.get("title", "").lower()[:60]
         if url in seen_urls or title_key in seen_titles:
             continue
         seen_urls.add(url)
