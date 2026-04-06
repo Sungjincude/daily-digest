@@ -23,95 +23,132 @@ PUBMED_KEY     = "05abc7658eeac8454076a773b5368fff6c09"
 OPENROUTER_KEY = "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"
 LLM_MODEL      = "stepfun/step-3.5-flash:free"
 
-# Exactly 6 topics, 1 article each
 TOPICS = [
-    {"label": "Finance",         "query": "finance banking currency exchange rates debt",       "feed": "https://feeds.bbci.co.uk/news/business/rss.xml"},
-    {"label": "Business",        "query": "business companies market industry trade economy",    "feed": "https://feeds.bbci.co.uk/news/business/rss.xml"},
-    {"label": "Technology",      "query": "technology software hardware AI startups",           "feed": "https://feeds.bbci.co.uk/news/technology/rss.xml"},
-    {"label": "Animals",         "query": "animals wildlife pets endangered species nature",    "feed": "https://www.google.com/rss"},
-    {"label": "Science",         "query": "science research discovery experiment medicine",     "feed": "https://feeds.bbci.co.uk/news/science_and_environment/rss.xml"},
-    {"label": "Arts and Travel", "query": "arts culture travel museum music painting",          "feed": "https://feeds.bbci.co.uk/news/arts/rss.xml"},
+    {
+        "label": "Finance",
+        "keywords": ["finance", "banking", "currency", "debt", "stock", "wall street", "invest", "bank", "interest rate", "inflation"],
+        "feeds": [
+            "https://feeds.bbci.co.uk/news/business/rss.xml",
+            "https://finance.yahoo.com/news/rssindex",
+        ],
+    },
+    {
+        "label": "Business",
+        "keywords": ["business", "company", "industry", "trade", "market", "corporate", "startup", "merger", "acquisition"],
+        "feeds": [
+            "https://feeds.bbci.co.uk/news/business/rss.xml",
+            "https://www.reuters.com/rssFeed/business",
+        ],
+    },
+    {
+        "label": "Technology",
+        "keywords": ["technology", "software", "AI", "artificial intelligence", "cyber", "data", "computing", "tech", "digital"],
+        "feeds": [
+            "https://feeds.bbci.co.uk/news/technology/rss.xml",
+            "https://www.wired.com/feed/rss",
+        ],
+    },
+    {
+        "label": "Animals",
+        "keywords": ["animal", "wildlife", "endangered", "conservation", "species", "pet", "dog", "cat", "ocean", "marine", "bird"],
+        "feeds": [
+            "https://feeds.bbci.co.uk/news/science_and_environment/rss.xml",
+            "https://news.google.com/rss/search?q=animals+wildlife&hl=en-US&gl=US&ceid=US:en",
+        ],
+    },
+    {
+        "label": "Science",
+        "keywords": ["science", "research", "discovery", "experiment", "medicine", "biology", "physics", "space", "NASA", "DNA"],
+        "feeds": [
+            "https://feeds.bbci.co.uk/news/science_and_environment/rss.xml",
+            "https://news.google.com/rss/search?q=science+research+discovery&hl=en-US&gl=US&ceid=US:en",
+        ],
+    },
+    {
+        "label": "Arts and Travel",
+        "keywords": ["arts", "culture", "travel", "museum", "music", "film", "painting", "tourism", "festival", "exhibition"],
+        "feeds": [
+            "https://www.theguardian.com/world/rss",
+            "https://www.theguardian.com/travel/rss",
+            "https://news.google.com/rss/search?q=arts+culture+travel&hl=en-US&gl=US&ceid=US:en",
+        ],
+    },
 ]
 
-GNEWS_SEARCH  = "https://gnews.io/api/v4/search"
 PUBMED_SEARCH = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
 PUBMED_SUMMARY = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
 
 
-def fetch_rss(label: str, feed_url: str) -> list[dict]:
-    """Fetch articles from an RSS feed."""
+def clean_html(s):
+    return re.sub(r"<[^>]+>", "", s).strip()
+
+
+def matches_keywords(text, keywords):
+    """Check if text contains any of the topic keywords (case insensitive)."""
+    text_lower = text.lower()
+    return any(kw.lower() in text_lower for kw in keywords)
+
+
+def fetch_rss(feed_url):
+    """Fetch all articles from a single RSS feed."""
     try:
-        r = requests.get(feed_url, timeout=20)
+        r = requests.get(feed_url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
         if not r.ok:
             return []
-        text = r.text.replace("]]>", "")
-        root = ET.fromstring(text)
+        # Some feeds have encoding issues
+        text = r.text.replace("]]>", "").strip()
+        if not text.startswith("<?xml") and not text.startswith("<rss"):
+            # Could be RSS with BOM or encoding declaration
+            pass
+
+        root = ET.fromstring(text.encode("utf-8"))
         articles = []
-        seen = set()
         for item in root.iter("item"):
             title = item.findtext("title", "").strip()
             link = item.findtext("link", "").strip()
-            desc = re.sub(r"<[^>]+>", "", item.findtext("description", "") or "").strip()[:150]
-            if not title or link in seen:
+            desc = clean_html(item.findtext("description", "") or "")
+            if not title or not link:
                 continue
-            # Filter: reject if it doesn't match the topic keywords
-            articles.append({
-                "title": title, "description": desc, "url": link,
-                "source": "BBC", "_label": label,
-            })
+            articles.append({"title": title, "url": link, "description": desc[:200], "source": "RSS"})
         return articles
     except Exception as e:
-        logging.warning(f"RSS {label} failed: {e}")
+        logging.warning(f"  RSS feed failed ({feed_url}): {e}")
         return []
 
 
-def fetch_gnews(query: str, label: str) -> list[dict]:
-    """Fetch articles from GNews."""
-    try:
-        resp = requests.get(GNEWS_SEARCH, params={
-            "q": query, "lang": "en", "sortby": "publishedAt",
-            "max": 10, "token": GNEWS_API_KEY,
-        }, timeout=20)
-        resp.raise_for_status()
-        data = resp.json()
-        articles = []
-        seen = set()
-        for a in data.get("articles", []):
-            if not a.get("title") or not a.get("url") or a["url"] in seen:
-                continue
-            seen.add(a["url"])
-            articles.append(a)
-            articles[-1]["_label"] = label
-        return articles
-    except Exception as e:
-        logging.warning(f"GNews failed for '{query}': {e}")
-        return []
-
-
-def fetch_all_news() -> list[dict]:
-    """Fetch 1 article per topic from GNews, fallback to RSS."""
+def fetch_one_article_per_topic() -> list[dict]:
+    """For each topic, try all feeds, pick the first article matching keywords."""
     result = []
     for topic in TOPICS:
-        logging.info(f"Fetching {topic['label']} ...")
+        label = topic["label"]
+        keywords = topic["keywords"]
+        logging.info(f"Fetching {label} ...")
 
-        # Try GNews first
-        articles = fetch_gnews(topic["query"], topic["label"])
-        if not articles:
-            logging.info(f"  Falling back to RSS for {topic['label']}")
-            articles = fetch_rss(topic["label"], topic["feed"])
+        found = None
+        for feed_url in topic["feeds"]:
+            if found:
+                break
+            logging.info(f"  Trying feed: {feed_url}")
+            articles = fetch_rss(feed_url)
+            logging.info(f"    Feed returned {len(articles)} articles")
+            for a in articles:
+                combined = (a["title"] + " " + a["description"]).lower()
+                if matches_keywords(a["title"] + " " + a["description"], keywords):
+                    found = a
+                    found["_label"] = label
+                    logging.info(f"  MATCH: {found['title'][:80]}")
+                    break
 
-        if articles:
-            result.append(articles[0])  # Take the best (most recent) one
-            logging.info(f"  Got: {articles[0]['title'][:80]}")
+        if found:
+            result.append(found)
         else:
-            logging.warning(f"  No articles for {topic['label']}")
+            logging.warning(f"  NO MATCH for {label}")
 
-    logging.info(f"Fetched {len(result)} articles (goal: {len(TOPICS)})")
+    logging.info(f"Fetched {len(result)}/{len(TOPICS)} articles")
     return result
 
 
 def fetch_pubmed(count: int) -> list[dict]:
-    """Fetch recent scientific papers from PubMed."""
     logging.info("Fetching PubMed papers ...")
     try:
         resp = requests.get(PUBMED_SEARCH, params={
@@ -121,7 +158,6 @@ def fetch_pubmed(count: int) -> list[dict]:
         }, timeout=30)
         resp.raise_for_status()
         ids = resp.json().get("esearchresult", {}).get("idlist", [])
-        logging.info(f"  PubMed found {len(ids)} IDs")
         if not ids:
             return []
         resp = requests.get(PUBMED_SUMMARY, params={
@@ -150,19 +186,17 @@ def fetch_pubmed(count: int) -> list[dict]:
 
 
 def curate_with_llm(items: list[dict]) -> str:
-    """LLM curates and writes summaries."""
     prompt = (
-        "You are writing a daily news digest. Below are recent articles and papers.\n\n"
-        "For the news articles, group them by their category (label).\n"
-        "For scientific papers, put them under SCIENTIFIC PAPERS.\n\n"
-        "Format each article as:\n"
+        "You are writing a daily news digest. Below are recent articles and scientific papers.\n\n"
+        "Group them by their category (shown as _label).\n"
+        "Format each item as:\n"
         "TITLE\n"
         "   One-sentence summary\n"
         "   URL\n\n"
-        "Keep it clean and readable. No markdown code blocks.\n\n"
+        "Keep it clean. No markdown code blocks, no backticks.\n\n"
         + json.dumps(
             [{"title": a["title"], "description": a.get("description",""),
-              "url": a["url"], "source": a.get("source","Unknown"),
+              "url": a["url"], "source": a.get("source",""),
               "category": a["_label"]}
              for a in items],
             ensure_ascii=False,
@@ -185,14 +219,10 @@ def curate_with_llm(items: list[dict]) -> str:
 
 
 def format_fallback(items: list[dict]) -> str:
-    """Simple formatting without LLM."""
-    groups = defaultdict(list)
-    for a in items:
-        groups[a["_label"]].append(a)
     lines = []
     for topic in TOPICS:
         label = topic["label"]
-        arts = groups.get(label, [])
+        arts = [a for a in items if a.get("_label") == label]
         if arts:
             a = arts[0]
             lines.append(f"--- {label} ---")
@@ -202,7 +232,7 @@ def format_fallback(items: list[dict]) -> str:
                 lines.append(f"  {desc[:150]}")
             lines.append(f"  {a['url']}")
             lines.append("")
-    papers = groups.get("SCIENTIFIC PAPERS", [])
+    papers = [a for a in items if a.get("_label") == "SCIENTIFIC PAPERS"]
     if papers:
         lines.append("--- SCIENTIFIC PAPERS ---")
         for p in papers:
@@ -229,7 +259,7 @@ def send_telegram(text: str):
 
 def main():
     logging.info("=== Daily Digest ===")
-    news = fetch_all_news()
+    news = fetch_one_article_per_topic()
     papers = fetch_pubmed(2)
     items = news + papers
     if not items:
