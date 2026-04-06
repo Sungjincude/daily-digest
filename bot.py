@@ -26,9 +26,9 @@ LLM_MODEL      = "meta-llama/llama-3.3-70b-instruct:free"
 PUBMED_COUNT   = 2
 
 NEWS_CATEGORIES = [
-    {"label": "📊 Οικονομία & Επιχειρήσεις", "topic": "business",     "country": "us"},
-    {"label": "🔬 Επιστήμη & Τεχνολογία",    "topic": "technology",  "country": "us"},
-    {"label": "🌍 Κόσμος & Πολιτισμός",      "topic": "world",       "country": "us"},
+    {"label": "📊 Οικονομία & Επιχειρήσεις", "topic": "business",     "country": "us", "count": 5},
+    {"label": "🔬 Επιστήμη & Τεχνολογία",    "topic": "technology",  "country": "us", "count": 3},
+    {"label": "🌍 Κόσμος & Πολιτισμός",      "topic": "world",       "country": "us", "count": 2},
 ]
 
 GNEWS_URL      = "https://gnews.io/api/v4/top-headlines"
