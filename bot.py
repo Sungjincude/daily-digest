@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """Daily article digest bot.
 
-Fetches news (GNews), scientific papers (PubMed), curates with an LLM,
+Fetches news (GNews) and scientific papers (PubMed), curates with an LLM,
 and sends to Telegram via a scheduled GitHub Action.
 """
 
 import json
 import logging
-from datetime import datetime, timedelta, timezone
+from collections import defaultdict
+from datetime import datetime, timezone, timedelta
 
 import requests
 
@@ -22,45 +23,39 @@ TELEGRAM_CHAT  = "5956713175"
 GNEWS_API_KEY  = "2c4ae04520de960086ad6a7b07188356"
 PUBMED_KEY     = "05abc7658eeac8454076a773b5368fff6c09"
 OPENROUTER_KEY = "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"
-LLM_MODEL      = "meta-llama/llama-3.3-70b-instruct:free"
-PUBMED_COUNT   = 2
+LLM_MODEL      = "mistralai/mistral-small-3.1-24b-instruct:free"
 
 NEWS_CATEGORIES = [
-    {"label": "📊 Οικονομία & Επιχειρήσεις", "topic": "business",     "country": "us", "count": 5},
-    {"label": "🔬 Επιστήμη & Τεχνολογία",    "topic": "technology",  "country": "us", "count": 3},
-    {"label": "🌍 Κόσμος & Πολιτισμός",      "topic": "world",       "country": "us", "count": 2},
+    {"label": "BUSINESS & ECONOMY",       "query": "economy inflation stock market GDP crypto business finance", "count": 5},
+    {"label": "SCIENCE & TECHNOLOGY",     "query": "science research technology discovery space medicine",       "count": 3},
+    {"label": "WORLD & CULTURE",          "query": "geography culture travel society international",             "count": 2},
 ]
 
-GNEWS_URL      = "https://gnews.io/api/v4/top-headlines"
-GNEWS_SEARCH   = "https://gnews.io/api/v4/search"
-PUBMED_SEARCH  = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
+GNEWS_SEARCH_URL = "https://gnews.io/api/v4/search"
+PUBMED_SEARCH = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
 PUBMED_SUMMARY = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 
-def fetch_gnews(category: str, country: str, count: int) -> list[dict]:
-    resp = requests.get(GNEWS_URL, params={
-        "category": category,
-        "country":  country,
-        "lang":     "en",
-        "max":      count * 3,
-        "token":    GNEWS_API_KEY,
+def fetch_gnews(query: str, count: int) -> list[dict]:
+    resp = requests.get(GNEWS_SEARCH_URL, params={
+        "q": query, "lang": "en", "sortby": "publishedAt",
+        "max": count * 3, "token": GNEWS_API_KEY,
     }, timeout=30)
     resp.raise_for_status()
-    articles = []
-    seen = set()
+    seen, articles = set(), []
     for a in resp.json().get("articles", []):
-        if not a.get("url") or a["url"] in seen or not a.get("title"):
-            continue
-        seen.add(a["url"])
-        articles.append(a)
+        if a.get("url") and a["url"] not in seen and a.get("title"):
+            seen.add(a["url"])
+            articles.append(a)
     return articles[: count * 2]
 
 
 def fetch_all_news() -> list[dict]:
     result = []
     for cat in NEWS_CATEGORIES:
-        logging.info(f"Fetching {cat['label']} …")
-        for a in fetch_gnews(cat["topic"], cat["country"], cat["count"]):
+        logging.info(f"Fetching {cat['label']} ...")
+        for a in fetch_gnews(cat["query"], cat["count"]):
             a["_label"] = cat["label"]
             result.append(a)
     logging.info(f"Fetched {len(result)} news articles")
@@ -68,148 +63,135 @@ def fetch_all_news() -> list[dict]:
 
 
 def fetch_pubmed(count: int) -> list[dict]:
-    resp = requests.get(PUBMED_SEARCH, params={
-        "db": "pubmed",
-        "term": "last 7 days[edat]",
-        "sort": "relevance",
-        "retmax": count * 5,
-        "retmode": "json",
-        "api_key": PUBMED_KEY,
-    }, timeout=30)
-    resp.raise_for_status()
-    ids = resp.json().get("esearchresult", {}).get("idlist", [])
-    if not ids:
+    logging.info("Fetching PubMed papers ...")
+    try:
+        resp = requests.get(PUBMED_SEARCH, params={
+            "db": "pubmed", "term": "last 7 days[edat]",
+            "sort": "relevance", "retmax": count*5,
+            "retmode": "json", "api_key": PUBMED_KEY,
+        }, timeout=30)
+        resp.raise_for_status()
+        ids = resp.json().get("esearchresult", {}).get("idlist", [])
+        if not ids:
+            return []
+        resp = requests.get(PUBMED_SUMMARY, params={
+            "db": "pubmed", "id": ",".join(ids[:count*3]),
+            "retmode": "json", "api_key": PUBMED_KEY,
+        }, timeout=30)
+        resp.raise_for_status()
+        docs = resp.json().get("result", {})
+        papers = []
+        for uid, doc in docs.items():
+            if uid == "uids":
+                continue
+            title = doc.get("title", "").strip()
+            source = doc.get("source", "").strip()
+            papers.append({
+                "title": title, "description": "",
+                "url": f"https://pubmed.ncbi.nlm.nih.gov/{uid}/",
+                "source": source or "PubMed", "_label": "SCIENTIFIC PAPERS",
+            })
+        return papers[:count]
+    except Exception as e:
+        logging.warning(f"PubMed fetch failed: {e}")
         return []
-
-    resp = requests.get(PUBMED_SUMMARY, params={
-        "db":     "pubmed",
-        "id":     ",".join(ids),
-        "retmode":"json",
-        "api_key": PUBMED_KEY,
-    }, timeout=30)
-    resp.raise_for_status()
-    docs = resp.json().get("result", {})
-
-    papers = []
-    for uid, doc in docs.items():
-        if uid == "uids":
-            continue
-        papers.append({
-            "title":     doc.get("title", ""),
-            "description": "",
-            "url":       f"https://pubmed.ncbi.nlm.nih.gov/{uid}/",
-            "source":    doc.get("source", ""),
-            "category":  "pubmed",
-            "_label":    "🧬 Επιστημονικές Δημοσιεύσεις (PubMed)",
-        })
-
-    return papers[:count]
 
 
 def curate_with_llm(news: list[dict], papers: list[dict]) -> str:
-    items = news + papers
-    payload = [
-        {
-            "role": "system",
-            "content": (
-                "You are a news-editor. Given articles and scientific papers, curate them. "
-                "News sections: exactly 5 economics, 3 science/tech, 2 world. "
-                "Papers: include all. "
-                "Return ONLY formatted text — NO JSON, NO markdown code blocks, NO backticks. "
-                "For each item: short title, one-sentence summary, source, url. "
-                "Use the _label field as section header exactly as given. "
-                "Use Unicode emoji only (no :emoji: syntax)."
-            ),
-        },
-        {
-            "role": "user",
-            "content": json.dumps(
-                [{"title": a["title"], "description": a.get("description",""),
-                  "url": a["url"], "source": a.get("source","Unknown"),
-                  "_label": a["_label"]}
-                 for a in items],
-                ensure_ascii=False,
-            ),
-        },
-    ]
-    logging.info("Asking LLM to curate …")
-    resp = requests.post(
-        "https://openrouter.ai/api/v1/chat/completions",
-        headers={
-            "Authorization": f"Bearer {OPENROUTER_KEY}",
-            "Content-Type":   "application/json",
-            "HTTP-Referer":   "https://github.com/daily-digest",
-        },
-        json={"model": LLM_MODEL, "messages": payload, "temperature": 0.3},
-        timeout=120,
+    all_items = news + papers
+    logging.info(f"Sending {len(all_items)} items to LLM for curation ...")
+
+    prompt = (
+        "You are a news digest curator. Below is a JSON array of news articles "
+        "and scientific papers. Curate exactly 10 items: 5 economics, 3 science, "
+        "2 world. Include all scientific papers as a separate section.\n"
+        "Format: use section headers in ALL CAPS, then for each item:\n"
+        "NUMBER. TITLE\n"
+        "One-sentence summary.\n"
+        "URL\n\n"
+        "Keep it clean and readable. No markdown code blocks, no JSON output.\n\n"
+        + json.dumps(
+            [{"title": a["title"], "description": a.get("description",""),
+              "url": a["url"], "source": a.get("source","Unknown"),
+              "category": a["_label"]}
+             for a in all_items],
+            ensure_ascii=False,
+        )
     )
-    resp.raise_for_status()
+
+    resp = requests.post(OPENROUTER_URL, json={
+        "model": LLM_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.3,
+    }, headers={
+        "Authorization": f"Bearer {OPENROUTER_KEY}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://github.com/daily-digest",
+    }, timeout=120)
+
+    if not resp.ok:
+        logging.warning(f"LLM returned {resp.status_code}: {resp.text[:200]}")
+        resp.raise_for_status()
+
     return resp.json()["choices"][0]["message"]["content"]
 
 
-def curate_rules(news: list[dict], papers: list[dict]) -> str:
-    from collections import defaultdict
+def format_fallback(news: list[dict], papers: list[dict]) -> str:
+    """Non-LLM fallback formatting."""
     groups = defaultdict(list)
-    for a in news + papers:
+    for a in news:
         groups[a["_label"]].append(a)
     lines = []
-    targets = {c["label"]: c["count"] for c in NEWS_CATEGORIES}
-    targets["🧬 Επιστημονικές Δημοσιεύσεις (PubMed)"] = PUBMED_COUNT
-    for label, alist in groups.items():
-        lines.append(f"\n{label}")
-        for i, a in enumerate(alist[: targets.get(label, 5)]):
-            lines.append(f"  {i+1}. {a['title']}")
-            if a.get("description"):
-                lines.append(f"     {a['description']}")
-            lines.append(f"     🔗 {a['url']}")
+    for cat in NEWS_CATEGORIES:
+        label, articles = cat["label"], groups.get(cat["label"], [])[:cat["count"]]
+        if articles:
+            lines.append(f"\n--- {label} ---")
+            for i, a in enumerate(articles, 1):
+                lines.append(f"  {i}. {a['title']}")
+                desc = a.get("description","")
+                if desc:
+                    lines.append(f"     {desc[:150]}")
+                lines.append(f"     {a['url']}")
+    if papers:
+        lines.append(f"\n--- SCIENTIFIC PAPERS ---")
+        for i, p in enumerate(papers, 1):
+            lines.append(f"  {i}. {p['title']}")
+            lines.append(f"     {p['url']}")
     return "\n".join(lines)
 
 
 def send_telegram(text: str):
-    MAX = 4000
+    """Send plain text to Telegram (no markdown parsing to avoid escaping issues)."""
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    header = f"☀️ Καλημέρα! Daily digest — {datetime.now(timezone.utc).strftime('%Y-%m-%d')}\n\n"
-    full = header + text
-
-    # Send in chunks if needed (no markdown to avoid escaping issues)
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    full = f"Good morning! Daily digest - {today}\n\n{text}"
+    MAX = 4000
     for start in range(0, len(full), MAX):
         chunk = full[start:start + MAX]
         resp = requests.post(url, json={
-            "chat_id": TELEGRAM_CHAT,
-            "text": chunk,
+            "chat_id": TELEGRAM_CHAT, "text": chunk,
             "disable_web_page_preview": True,
         }, timeout=30)
         resp.raise_for_status()
-    logging.info(f"Digest sent to Telegram ✓")
+    logging.info(f"Digest sent to Telegram")
 
 
 def main():
-    logging.info(f"=== Daily Digest {datetime.now(timezone.utc).strftime('%Y-%m-%d')} ===")
-
-    news   = fetch_all_news()
-    papers = []
-    try:
-        papers = fetch_pubmed(PUBMED_COUNT)
-        logging.info(f"Fetched {len(papers)} PubMed papers")
-    except Exception:
-        logging.exception("PubMed fetch failed")
-
-    all_items = news + papers
-    if not all_items:
+    logging.info("=== Daily Digest ===")
+    news = fetch_all_news()
+    papers = fetch_pubmed(2)
+    if not news and not papers:
         send_telegram("No articles found today.")
         return
-
-    open_key = OPENROUTER_KEY.strip() if OPENROUTER_KEY else ""
-    if open_key and len(open_key) > 10:
-        try:
-            digest = curate_with_llm(news, papers)
-        except Exception:
-            logging.exception("LLM failed, using fallback")
-            digest = curate_rules(news, papers)
-    else:
-        digest = curate_rules(news, papers)
-
+    # Try LLM curation, fallback to rules
+    try:
+        digest = curate_with_llm(news, papers)
+        logging.info("LLM curation succeeded")
+    except Exception as e:
+        logging.warning(f"LLM failed ({e}), using fallback")
+        digest = format_fallback(news, papers)
     send_telegram(digest)
+    logging.info("Done!")
 
 
 if __name__ == "__main__":
