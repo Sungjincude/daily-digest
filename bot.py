@@ -107,17 +107,8 @@ def fetch_google_news(query, max_items=20):
             title = item.findtext("title", "").strip()
             if not title:
                 continue
-            # Try to get the real article URL
-            link_elem = item.find("link")
-            raw_link = ""
-            if link_elem is not None:
-                raw_link = link_elem.text or link_elem.get("href", "")
-            # Prefer the source element URL (real article URL)
-            source_elem = item.find("{http://purl.org/dc/elements/1.1/}source")
-            if source_elem is not None and source_elem.get("url"):
-                raw_link = source_elem.get("url")
-            if not raw_link:
-                raw_link = f"https://www.google.com/search?q={'+'.join(title.split()[:5])}"
+            # Always use a Google search link (Google RSS doesn't reliably give real URLs)
+            raw_link = f"https://www.google.com/search?q={'+'.join(title.split()[:5])}"
             # Clean description
             desc_raw = item.findtext("{http://purl.org/dc/elements/1.1/}description",
                                      item.findtext("description", "") or "")
@@ -322,7 +313,8 @@ def generate_bonus_sections():
     return result
 
 
-def format_digest(selected, papers, bonus=None):
+def format_articles(selected, papers):
+    """Format just the articles section (message 1)."""
     lines = []
     for topic in TOPICS:
         label = topic["label"]
@@ -344,24 +336,33 @@ def format_digest(selected, papers, bonus=None):
             lines.append(f"  {p['title'].strip()}")
             lines.append(f"  {p['url']}")
             lines.append("")
-    if bonus:
-        lines.append(bonus)
     return "\n".join(lines)
 
 
-def send_telegram(text):
+def send_telegram_two_messages(articles_text, bonus_text):
+    """Send articles and bonus as two separate Telegram messages."""
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    full = f"Good morning! Daily digest - {today}\n\n{text}"
-    MAX = 4000
-    for start in range(0, len(full), MAX):
-        chunk = full[start:start + MAX]
+    header = f"Good morning! Daily digest - {today}"
+
+    # Message 1: Articles
+    msg1 = header + "\n\n" + articles_text
+    resp = requests.post(url, json={
+        "chat_id": TELEGRAM_CHAT, "text": msg1[:4000],
+        "disable_web_page_preview": True,
+    }, timeout=30)
+    resp.raise_for_status()
+    logging.info("Articles sent to Telegram")
+
+    # Message 2: Bonus (fun facts + place)
+    if bonus_text:
+        msg2 = f" Extra bits - {today}\n\n" + bonus_text
         resp = requests.post(url, json={
-            "chat_id": TELEGRAM_CHAT, "text": chunk,
+            "chat_id": TELEGRAM_CHAT, "text": msg2[:4000],
             "disable_web_page_preview": True,
         }, timeout=30)
         resp.raise_for_status()
-    logging.info("Digest sent to Telegram OK")
+        logging.info("Bonus sent to Telegram")
 
 
 def main():
@@ -401,8 +402,8 @@ def main():
             logging.info("Bonus sections generated OK")
     except Exception as e:
         logging.warning(f"Bonus generation failed: {e}")
-    digest = format_digest(selected, papers, bonus)
-    send_telegram(digest)
+    articles_text = format_articles(selected, papers)
+    send_telegram_two_messages(articles_text, bonus)
     logging.info("Done!")
 
 
