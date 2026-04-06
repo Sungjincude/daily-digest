@@ -109,11 +109,14 @@ def fetch_google_news(query, max_items=20):
                                  item.findtext("description", ""))
             desc = re.sub(r'https?://\S+', '', desc or "").strip()[:200]
 
+            # If source URL is empty, use Google search as fallback
+            if not link:
+                link = f"https://www.google.com/search?q={'+'.join(clean_title.split()[:5])}"
             articles.append({
                 "title": clean_title,
                 "description": desc,
                 "source": src or "Google News",
-                "url": link or "",
+                "url": link,
             })
         return articles
     except Exception as e:
