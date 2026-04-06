@@ -26,7 +26,9 @@ LLM_MODEL      = "stepfun/step-3.5-flash:free"
 TOPICS = [
     {
         "label": "Finance",
-        "keywords": ["finance", "banking", "currency", "debt", "stock", "wall street", "invest", "bank", "interest rate", "inflation"],
+        "keywords": ["finance", "banking", "currency", "debt", "stock", "wall street",
+                      "invest", "bank", "interest rate", "inflation", "federal reserve",
+                      "treasury", "bonds", "hedge fund"],
         "feeds": [
             "https://feeds.bbci.co.uk/news/business/rss.xml",
             "https://finance.yahoo.com/news/rssindex",
@@ -34,7 +36,8 @@ TOPICS = [
     },
     {
         "label": "Business",
-        "keywords": ["business", "company", "industry", "trade", "market", "corporate", "startup", "merger", "acquisition"],
+        "keywords": ["business", "company", "industry", "trade", "market", "corporate",
+                      "startup", "merger", "acquisition", "CEO", "executive", "earnings"],
         "feeds": [
             "https://feeds.bbci.co.uk/news/business/rss.xml",
             "https://www.reuters.com/rssFeed/business",
@@ -42,7 +45,9 @@ TOPICS = [
     },
     {
         "label": "Technology",
-        "keywords": ["technology", "software", "AI", "artificial intelligence", "cyber", "data", "computing", "tech", "digital"],
+        "keywords": ["technology", "software", "AI", "artificial intelligence", "cyber",
+                      "data", "computing", "tech", "digital", "internet", "cloud",
+                      "cybersecurity", "startup", "chip", "semiconductor"],
         "feeds": [
             "https://feeds.bbci.co.uk/news/technology/rss.xml",
             "https://www.wired.com/feed/rss",
@@ -50,27 +55,42 @@ TOPICS = [
     },
     {
         "label": "Animals",
-        "keywords": ["animal", "wildlife", "endangered", "conservation", "species", "pet", "dog", "cat", "ocean", "marine", "bird"],
+        "keywords": ["animal", "wildlife", "endangered", "conservation", "species",
+                      "pet", "dog", "cat", "ocean", "marine", "bird", "dinosaur",
+                      "mammal", "reptile", "habitat", "ecosystem"],
         "feeds": [
             "https://feeds.bbci.co.uk/news/science_and_environment/rss.xml",
-            "https://news.google.com/rss/search?q=animals+wildlife&hl=en-US&gl=US&ceid=US:en",
         ],
     },
     {
         "label": "Science",
-        "keywords": ["science", "research", "discovery", "experiment", "medicine", "biology", "physics", "space", "NASA", "DNA"],
+        "keywords": ["science", "research", "discovery", "experiment", "medicine",
+                      "biology", "physics", "space", "NASA", "DNA", "genome",
+                      "quantum", "astronomy", "neuroscience", "clinical trial"],
         "feeds": [
             "https://feeds.bbci.co.uk/news/science_and_environment/rss.xml",
-            "https://news.google.com/rss/search?q=science+research+discovery&hl=en-US&gl=US&ceid=US:en",
+            "https://www.nasa.gov/rss/dyn/breaking_news.rss",
+        ],
+    },
+    {
+        "label": "History",
+        "keywords": ["history", "historical", "ancient", "medieval", "archaeology",
+                      "archaeological", "artifact", "empire", "civilization",
+                      "historic", "war history", "historian"],
+        "feeds": [
+            "https://www.historytoday.com/rss",
         ],
     },
     {
         "label": "Arts and Travel",
-        "keywords": ["arts", "culture", "travel", "museum", "music", "film", "painting", "tourism", "festival", "exhibition"],
+        "keywords": ["arts", "culture", "travel", "museum", "music", "film",
+                      "painting", "tourism", "festival", "exhibition", "gallery",
+                      "theatre", "theater", "concert", "destination", "tourist",
+                      "heritage", "cultural", "art", "artist"],
         "feeds": [
-            "https://www.theguardian.com/world/rss",
             "https://www.theguardian.com/travel/rss",
-            "https://news.google.com/rss/search?q=arts+culture+travel&hl=en-US&gl=US&ceid=US:en",
+            "https://www.theguardian.com/arts/rss",
+            "https://www.theguardian.com/culture/rss",
         ],
     },
 ]
@@ -84,23 +104,37 @@ def clean_html(s):
 
 
 def matches_keywords(text, keywords):
-    """Check if text contains any of the topic keywords (case insensitive)."""
     text_lower = text.lower()
     return any(kw.lower() in text_lower for kw in keywords)
 
 
-def fetch_rss(feed_url):
-    """Fetch all articles from a single RSS feed."""
-    try:
-        r = requests.get(feed_url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
-        if not r.ok:
-            return []
-        # Some feeds have encoding issues
-        text = r.text.replace("]]>", "").strip()
-        if not text.startswith("<?xml") and not text.startswith("<rss"):
-            # Could be RSS with BOM or encoding declaration
-            pass
+# Words that indicate a bad match (weather, local news, etc.)
+EXCLUDE_KEYWORDS = [
+    "weather", "forecast", "temperature", "degrees", "celsius", "fahrenheit",
+    "rain", "snowfall", "precipitation", "met office",
+    "lottery", "obituary", "death notice",
+    "classified", "advertisement", "advert",
+]
 
+
+def is_relevant(articles, include, exclude):
+    combined = (" ".join(a["title"] for a in articles) + " " +
+                " ".join(a.get("description", "") for a in articles)).lower()
+    if any(ex in combined for ex in [e.lower() for e in exclude]):
+        return False
+    return any(kw.lower() in combined for kw in include)
+
+
+def fetch_rss(feed_url):
+    try:
+        r = requests.get(
+            feed_url, timeout=15,
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
+        )
+        if not r.ok:
+            logging.warning(f"    Feed HTTP {r.status_code}")
+            return []
+        text = r.text.replace("]]>", "").strip()
         root = ET.fromstring(text.encode("utf-8"))
         articles = []
         for item in root.iter("item"):
@@ -109,15 +143,17 @@ def fetch_rss(feed_url):
             desc = clean_html(item.findtext("description", "") or "")
             if not title or not link:
                 continue
-            articles.append({"title": title, "url": link, "description": desc[:200], "source": "RSS"})
+            articles.append({
+                "title": title, "url": link,
+                "description": desc[:200], "source": "RSS",
+            })
         return articles
     except Exception as e:
-        logging.warning(f"  RSS feed failed ({feed_url}): {e}")
+        logging.warning(f"    Feed failed: {e}")
         return []
 
 
 def fetch_one_article_per_topic() -> list[dict]:
-    """For each topic, try all feeds, pick the first article matching keywords."""
     result = []
     for topic in TOPICS:
         label = topic["label"]
@@ -128,16 +164,23 @@ def fetch_one_article_per_topic() -> list[dict]:
         for feed_url in topic["feeds"]:
             if found:
                 break
-            logging.info(f"  Trying feed: {feed_url}")
+            logging.info(f"  Trying: {feed_url.split('://')[1][:50]}...")
             articles = fetch_rss(feed_url)
-            logging.info(f"    Feed returned {len(articles)} articles")
+            logging.info(f"    Got {len(articles)} articles from feed")
+
             for a in articles:
-                combined = (a["title"] + " " + a["description"]).lower()
-                if matches_keywords(a["title"] + " " + a["description"], keywords):
-                    found = a
-                    found["_label"] = label
-                    logging.info(f"  MATCH: {found['title'][:80]}")
-                    break
+                # Check relevance: must have keywords, must NOT have exclude words
+                title_desc = a["title"] + " " + a["description"]
+                if not matches_keywords(title_desc, keywords):
+                    continue
+                # Exclude weather/unwanted content
+                td_lower = title_desc.lower()
+                if any(ex in td_lower for ex in [e.lower() for e in EXCLUDE_KEYWORDS]):
+                    continue
+                found = a
+                found["_label"] = label
+                logging.info(f"  MATCH: {found['title'][:80]}")
+                break
 
         if found:
             result.append(found)
