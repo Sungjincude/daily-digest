@@ -290,17 +290,16 @@ def format_digest(selected, papers):
             if a.get("source"):
                 lines.append(f"  ({a['source']})")
             if a.get("description"):
-                # Strip any URLs from description to avoid double links
-                desc = re.sub(r"https?://\S+", "", a["description"].strip())
+                desc = a.get("description", "").strip()
                 if desc:
                     lines.append(f"  {desc[:150]}")
-            lines.append(f"  Link: {a.get('url', '')}")
+            lines.append(f"  {a.get('url', '')}")
             lines.append("")
     if papers:
         lines.append("--- Scientific Papers ---")
         for p in papers:
             lines.append(f"  {p['title'].strip()}")
-            lines.append(f"  Link: {p['url']}")
+            lines.append(f"  {p['url']}")
             lines.append("")
     return "\n".join(lines)
 
