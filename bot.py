@@ -105,19 +105,6 @@ def clean_description(text):
     return re.sub(r"\s+", " ", text).strip()
 
 
-def extract_google_news_url(desc_raw, link_elem, title):
-    """Extract the actual article redirect URL from Google News RSS."""
-    # The <a href> in the description has the Google News redirect URL
-    # which opens the real article in the browser (with cookies)
-    href_match = re.search(r'href="(https://news\.google\.com/rss/articles/[^"]+)"', desc_raw)
-    if href_match:
-        return href_match.group(1)
-    # Fallback to the <link> element
-    if link_elem:
-        return link_elem
-    return f"https://www.google.com/search?q={'+'.join(title.split()[:5])}"
-
-
 def fetch_google_news(query, max_items=20):
     url = f"{GN_BASE}/search?q={query}&hl=en-US&gl=US&ceid=US:en"
     try:
@@ -132,16 +119,15 @@ def fetch_google_news(query, max_items=20):
             title = item.findtext("title", "").strip()
             if not title:
                 continue
-            link_elem = item.findtext("link", "").strip()
+            raw_link = f"https://www.google.com/search?q={'+'.join(title.split()[:5])}"
             desc_raw = item.findtext("{http://purl.org/dc/elements/1.1/}description",
                                      item.findtext("description", "") or "")
-            article_url = extract_google_news_url(desc_raw, link_elem, title)
             desc = clean_description(desc_raw)[:200]
             articles.append({
                 "title": title,
                 "description": desc,
                 "source": title.rsplit(" - ", 1)[-1].strip() if " - " in title else "",
-                "url": article_url,
+                "url": raw_link,
             })
         return articles
     except Exception as e:
