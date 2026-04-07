@@ -1,17 +1,18 @@
 name: Daily Digest
 on:
   schedule:
-    - cron: "0 5 * * *"  # Winter: 5 UTC = 8 AM Greece (EET)
-    - cron: "0 6 * * *"  # Summer: 6 UTC = 8 AM Greece (EEST)
+    - cron: "0 6 * * *"  # 6 AM UTC = 9 AM Greece (EEST, summer)
   workflow_dispatch:
-  push:
-    branches: [main]
 
 jobs:
   digest:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -24,6 +25,17 @@ jobs:
 
       - name: Run bot
         run: python bot.py
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Save seen articles back to repo
+        if: always()
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add seen_articles.json
+          git diff --cached --quiet || git commit -m "update: seen articles $(date -u +%F)"
+          git push
 
       - name: Upload digest log
         uses: actions/upload-artifact@v4
