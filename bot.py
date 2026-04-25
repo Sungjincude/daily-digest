@@ -22,7 +22,7 @@ GNEWS_API_KEY  = "2c4ae04520de960086ad6a7b07188356"
 PUBMED_KEY     = "05abc7658eeac8454076a773b5368fff6c09"
 OPENROUTER_KEY = "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"
 LLM_MODEL_ARTICLES = "stepfun/step-3.5-flash:free"
-LLM_MODEL_BONUS    = "google/gemma-4-26b-a4b-it:free"
+LLM_MODEL_BONUS    = "nousresearch/hermes-3-llama-3.1-405b:free"
 GN_BASE = "https://news.google.com/rss"
 
 # Persistent seen-articles file stored in the repo (persists between GH Actions runs)
