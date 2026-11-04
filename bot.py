@@ -4,7 +4,9 @@
 import html
 import json
 import logging
+import os
 import re
+import sys
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone, timedelta
 
@@ -16,11 +18,24 @@ logging.basicConfig(
     force=True,
 )
 
-TELEGRAM_TOKEN = "8667775748:AAGxezFo2AlnTwMijbaJxT-2l61XqbgfXY0"
-TELEGRAM_CHAT  = "5956713175"
-GNEWS_API_KEY  = "2c4ae04520de960086ad6a7b07188356"
-PUBMED_KEY     = "05abc7658eeac8454076a773b5368fff6c09"
-OPENROUTER_KEY = "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"
+# --- Secrets: read from environment variables (never hardcode these) ---
+# Locally: export them in your shell or use a .env file (listed in .gitignore).
+# GitHub Actions: add them under Settings -> Secrets and variables -> Actions,
+# then expose them in the workflow with `env:`.
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
+TELEGRAM_CHAT  = os.environ.get("TELEGRAM_CHAT", "")
+GNEWS_API_KEY  = os.environ.get("GNEWS_API_KEY", "")
+PUBMED_KEY     = os.environ.get("PUBMED_KEY", "")
+OPENROUTER_KEY = os.environ.get("OPENROUTER_KEY", "")
+
+REQUIRED_SECRETS = {
+    "TELEGRAM_TOKEN": TELEGRAM_TOKEN,
+    "TELEGRAM_CHAT": TELEGRAM_CHAT,
+    "GNEWS_API_KEY": GNEWS_API_KEY,
+    "PUBMED_KEY": PUBMED_KEY,
+    "OPENROUTER_KEY": OPENROUTER_KEY,
+}
+
 LLM_MODEL_ARTICLES = "stepfun/step-3.5-flash:free"
 LLM_MODEL_BONUS    = "openai/gpt-oss-120b:free"
 GN_BASE = "https://news.google.com/rss"
@@ -41,6 +56,14 @@ TOPICS = [
 
 PUBMED_SEARCH = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
 PUBMED_SUMMARY = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
+
+
+def check_secrets():
+    """Exit early with a clear message if any required secret is missing."""
+    missing = [name for name, value in REQUIRED_SECRETS.items() if not value]
+    if missing:
+        logging.error("Missing required environment variables: " + ", ".join(missing))
+        sys.exit(1)
 
 
 def load_seen_articles():
@@ -465,6 +488,7 @@ def send_telegram_two_messages(articles_text, bonus_text):
 
 def main():
     logging.info("=== Daily Digest ===")
+    check_secrets()
     seen_data = load_seen_articles()
     logging.info(f"Loaded {len(seen_data['urls'])} seen URLs, {len(seen_data['titles'])} seen titles from memory")
 
